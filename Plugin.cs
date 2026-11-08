@@ -1,5 +1,4 @@
 ﻿using BepInEx;
-using Photon.Pun;
 using TMPro;
 using UnityEngine;
 using System.Collections.Generic;
@@ -8,7 +7,8 @@ using System.Reflection;
 
 namespace KevsNametags
 {
-    [BepInPlugin("org.kevsmod.gorillatag.kevsnametags", "Kevs Nametags", "1.0.7")]
+    [BepInPlugin("org.kevsmod.gorillatag.kevsnametags", "Kevs Nametags", "1.0.8")]
+    [BepInDependency("org.legoandmars.gorillatag.utilla", "1.7.3")]
     public class Plugin : BaseUnityPlugin
     {
         private float playerUpdateTimer;
@@ -36,15 +36,12 @@ namespace KevsNametags
         private void Update()
         {
             playerUpdateTimer += Time.deltaTime;
-
-            // Expensive stuff
             if (playerUpdateTimer >= 1f)
             {
                 playerUpdateTimer = 0f;
                 UpdatePlayerList();
             }
 
-            // Smooth stuff
             UpdateTagPositions();
         }
 
@@ -131,7 +128,11 @@ namespace KevsNametags
             if (fpsField != null)
                 fps = (int)fpsField.GetValue(rig);
 
-            return $"{rig.Creator?.NickName}\nFPS: {fps}\nPing: {PhotonNetwork.GetPing()} ms";
+            int red = Mathf.Clamp(Mathf.RoundToInt(rig.playerColor.r * 9f), 0, 9);
+            int green = Mathf.Clamp(Mathf.RoundToInt(rig.playerColor.g * 9f), 0, 9);
+            int blue = Mathf.Clamp(Mathf.RoundToInt(rig.playerColor.b * 9f), 0, 9);
+
+            return $"{rig.Creator?.NickName}\nFPS: {fps}\nCOLOR:({red},{green},{blue})";
         }
 
         private void UpdateTagPositions()
