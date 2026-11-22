@@ -2,7 +2,6 @@
 using TMPro;
 using UnityEngine;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 
 namespace KevsNametags
@@ -11,17 +10,36 @@ namespace KevsNametags
     public class Plugin : BaseUnityPlugin
     {
         private float playerUpdateTimer;
+        private float tagStatsTimer;
         private Camera mainCamera;
         private TMP_FontAsset utopium;
 
         private readonly Dictionary<VRRig, GameObject> nametags =
             new Dictionary<VRRig, GameObject>();
 
+        private readonly Dictionary<VRRig, TextMeshPro> nametagTexts =
+            new Dictionary<VRRig, TextMeshPro>();
+
+        private readonly Dictionary<VRRig, Vector3> previousRigPositions =
+            new Dictionary<VRRig, Vector3>();
+
+        private readonly Dictionary<VRRig, float> previousRigPositionTimes =
+            new Dictionary<VRRig, float>();
+
+        private readonly Dictionary<VRRig, float> rigSpeeds =
+            new Dictionary<VRRig, float>();
+
+        private readonly HashSet<VRRig> currentRigs = new HashSet<VRRig>();
+        private readonly List<VRRig> staleRigs = new List<VRRig>();
+
         private static readonly FieldInfo fpsField =
             typeof(VRRig).GetField("fps", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         private static readonly FieldInfo remoteVelocityField =
             typeof(VRRig).GetField("remoteVelocity", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        private const float FontRetryInterval = 5f;
+        private float fontRetryTimer;
 
         private void Start()
         {
@@ -30,9 +48,7 @@ namespace KevsNametags
 
         private void Awake()
         {
-            utopium = Resources
-                .FindObjectsOfTypeAll<TMP_FontAsset>()
-                .FirstOrDefault(f => f.name == "UtopiumPixel Raster");
+            FindFont();
         }
 
         private void Update()
@@ -40,28 +56,39 @@ namespace KevsNametags
             playerUpdateTimer += Time.deltaTime;
             if (playerUpdateTimer >= 1f)
             {
-                playerUpdateTimer = 0f;
+                playerUpdateTimer -= 1f;
                 UpdatePlayerList();
             }
 
             UpdateTagPositions();
+
+            tagStatsTimer += Time.unscaledDeltaTime;
+            if (tagStatsTimer >= 0.1f)
+            {
+                tagStatsTimer = 0f;
+                UpdateTagStats();
+            }
         }
 
         private void UpdatePlayerList()
         {
             if (utopium == null)
             {
-                utopium = Resources
-                    .FindObjectsOfTypeAll<TMP_FontAsset>()
-                    .FirstOrDefault(f => f.name == "UtopiumPixel Raster");
+                fontRetryTimer += 1f;
+                if (fontRetryTimer >= FontRetryInterval)
+                {
+                    fontRetryTimer = 0f;
+                    FindFont();
+                }
             }
 
             VRRig[] rigs = Object.FindObjectsByType<VRRig>(
             FindObjectsInactive.Exclude,
             FindObjectsSortMode.None);
 
-            HashSet<VRRig> currentRigs = new HashSet<VRRig>(rigs);
-            List<VRRig> staleRigs = new List<VRRig>();
+            currentRigs.Clear();
+            currentRigs.UnionWith(rigs);
+            staleRigs.Clear();
 
             foreach (var pair in nametags)
             {
@@ -75,6 +102,10 @@ namespace KevsNametags
                 {
                     Destroy(tag);
                     nametags.Remove(rig);
+                    nametagTexts.Remove(rig);
+                    previousRigPositions.Remove(rig);
+                    previousRigPositionTimes.Remove(rig);
+                    rigSpeeds.Remove(rig);
                 }
             }
 
@@ -102,24 +133,22 @@ namespace KevsNametags
                     if (utopium != null)
                         tmp.font = utopium;
 
-                    tmp.text = FormatNametag(rig);
-                    tmp.color = rig.playerColor;
-
                     nametags.Add(rig, tag);
+                    nametagTexts.Add(rig, tmp);
                 }
+            }
+        }
 
-                TextMeshPro text = nametags[rig].GetComponent<TextMeshPro>();
-
-                if (utopium != null && text.font != utopium)
-                    text.font = utopium;
-
-                string newName = FormatNametag(rig);
-
-                if (text.text != newName)
-                    text.text = newName;
-
-                if (text.color != rig.playerColor)
-                    text.color = rig.playerColor;
+        private void FindFont()
+        {
+            TMP_FontAsset[] fonts = Resources.FindObjectsOfTypeAll<TMP_FontAsset>();
+            foreach (TMP_FontAsset font in fonts)
+            {
+                if (font.name == "UtopiumPixel Raster")
+                {
+                    utopium = font;
+                    break;
+                }
             }
         }
 
@@ -130,16 +159,40 @@ namespace KevsNametags
             if (fpsField != null)
                 fps = (int)fpsField.GetValue(rig);
 
-            Vector3 velocity = Vector3.zero;
+            float speed = 0f;
 
-            if (remoteVelocityField != null)
-                velocity = (Vector3)remoteVelocityField.GetValue(rig);
+            if (rigSpeeds.TryGetValue(rig, out float currentSpeed))
+                speed = currentSpeed;
 
             int red = Mathf.Clamp(Mathf.RoundToInt(rig.playerColor.r * 9f), 0, 9);
             int green = Mathf.Clamp(Mathf.RoundToInt(rig.playerColor.g * 9f), 0, 9);
             int blue = Mathf.Clamp(Mathf.RoundToInt(rig.playerColor.b * 9f), 0, 9);
 
-            return $"{rig.Creator?.NickName}\nFPS:{fps} Speed:{velocity.magnitude:0.00}m/s\nCOLOR:{red},{green},{blue}";
+            return $"{rig.Creator?.NickName}\nFPS:{fps} Speed:{speed:0.00}m/s\nCOLOR:{red},{green},{blue}";
+        }
+
+        private Vector3 GetRigVelocity(VRRig rig)
+        {
+            Vector3 position = rig.transform.position;
+            float currentTime = Time.time;
+            Vector3 velocity = Vector3.zero;
+
+            if (previousRigPositions.TryGetValue(rig, out Vector3 previousPosition) &&
+                previousRigPositionTimes.TryGetValue(rig, out float previousTime))
+            {
+                float elapsed = currentTime - previousTime;
+
+                if (elapsed > 0f)
+                    velocity = (position - previousPosition) / elapsed;
+            }
+
+            previousRigPositions[rig] = position;
+            previousRigPositionTimes[rig] = currentTime;
+
+            if (velocity.sqrMagnitude == 0f && remoteVelocityField != null)
+                velocity = (Vector3)remoteVelocityField.GetValue(rig);
+
+            return velocity;
         }
 
         private void UpdateTagPositions()
@@ -151,6 +204,8 @@ namespace KevsNametags
 
                 if (rig == null || tag == null)
                     continue;
+
+                rigSpeeds[rig] = GetRigVelocity(rig).magnitude;
 
                 tag.transform.position =
                     rig.headMesh.transform.position + Vector3.up * 0.60f;
@@ -167,7 +222,35 @@ namespace KevsNametags
                 }
 
                 float rigScale = Mathf.Clamp(rig.scaleFactor, 0.1f, 3f);
-                tag.transform.localScale = Vector3.one * 0.25f * rigScale;
+                Vector3 tagScale = Vector3.one * 0.25f * rigScale;
+                if (tag.transform.localScale != tagScale)
+                    tag.transform.localScale = tagScale;
+            }
+        }
+
+        private void UpdateTagStats()
+        {
+            foreach (var pair in nametags)
+            {
+                VRRig rig = pair.Key;
+                GameObject tag = pair.Value;
+
+                if (rig == null || tag == null)
+                    continue;
+
+                if (!nametagTexts.TryGetValue(rig, out TextMeshPro text))
+                    continue;
+
+                if (utopium != null && text.font != utopium)
+                    text.font = utopium;
+
+                string newText = FormatNametag(rig);
+
+                if (text.text != newText)
+                    text.text = newText;
+
+                if (text.color != rig.playerColor)
+                    text.color = rig.playerColor;
             }
         }
 
@@ -180,6 +263,7 @@ namespace KevsNametags
             }
 
             nametags.Clear();
+            nametagTexts.Clear();
         }
     }
 }
